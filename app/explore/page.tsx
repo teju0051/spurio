@@ -177,6 +177,19 @@ export default function ExplorePage() {
           .maybeSingle();
 
         if (profileData) {
+          // 1. ENFORCE INITIAL LOAD BAN CHECK
+          if (
+            profileData.account_status &&
+            profileData.account_status !== "active"
+          ) {
+            alert(
+              "Systems had detected abnormalities in your account hence your session has been terminated, please relogin.",
+            );
+            await supabase.auth.signOut();
+            window.location.href = "/login";
+            return; // Stop execution instantly
+          }
+
           setProfile(profileData as Profile);
           if (!profileData.full_name) setIsProfileModalOpen(true);
         } else {
@@ -191,8 +204,11 @@ export default function ExplorePage() {
           setIsProfileModalOpen(true);
         }
 
-        await fetchCommunities();
-        await fetchPosts(0, true);
+        // Only fetch feed if the user is not an admin
+        if (profileData?.role !== "admin") {
+          await fetchCommunities();
+          await fetchPosts(0, true);
+        }
       } catch (error) {
         console.error("Profile fetch error:", error);
       } finally {
@@ -223,9 +239,42 @@ export default function ExplorePage() {
     };
   }, [router]);
 
+  // PAGINATION LISTENER
   useEffect(() => {
     if (page > 0) fetchPosts(page);
   }, [page]);
+
+  // 2. REAL-TIME MID-SESSION BAN LISTENER
+  useEffect(() => {
+    if (!profile?.id || profile.role === "admin") return;
+
+    const profileSubscription = supabase
+      .channel("enforce-ban-status")
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "profiles",
+          filter: `id=eq.${profile.id}`,
+        },
+        async (payload) => {
+          const newStatus = payload.new.account_status;
+          if (newStatus && newStatus !== "active") {
+            alert(
+              "Systems had detected abnormalities in your account hence your session has been terminated, please relogin.",
+            );
+            await supabase.auth.signOut();
+            window.location.href = "/login"; // Hard redirect clears cache
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(profileSubscription);
+    };
+  }, [profile?.id]);
 
   if (loading || !profile) {
     return (
@@ -283,7 +332,7 @@ export default function ExplorePage() {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={handleSearchSubmit}
-              placeholder="Search users (e.g. @kaveri1012)..."
+              placeholder="Search users."
               className="w-full bg-gray-50 border border-gray-100 rounded-full pl-12 pr-6 py-2.5 focus:outline-none focus:ring-2 focus:ring-[#38A1F3]"
             />
           </div>
@@ -583,7 +632,8 @@ function UserExploreView({
       <aside className="hidden lg:flex w-64 shrink-0 flex-col gap-6 h-full pb-6">
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-3 font-semibold px-4 py-3 bg-gray-50 text-gray-900 rounded-2xl">
-            <Activity className="w-5 h-5" /> Global Feed
+            <Activity className="w-5 h-5" />
+            Explore
           </div>
         </div>
         <hr className="border-gray-100" />
@@ -1613,49 +1663,504 @@ function ProfileModal({
   );
 }
 
+/* =========================================
+   NEW ADMIN ERP DASHBOARD
+   ========================================= */
 function AdminDashboardView({ profile, onRefresh }: any) {
-  const [stats, setStats] = useState({
-    registeredUsers: 0,
-    totalCommunities: 0,
-    totalPosts: 0,
-  });
-  const [modQueue, setModQueue] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [manualPostId, setManualPostId] = useState("");
+  const [activeTab, setActiveTab] = useState("dashboard");
+  const [isMobileDevice, setIsMobileDevice] = useState(false);
+  const router = useRouter();
 
-  const fetchAdminData = async () => {
-    try {
-      const { count: userCount } = await supabase
+  useEffect(() => {
+    // Strict Device Detection
+    const checkDevice = () => {
+      const userAgent = navigator.userAgent.toLowerCase();
+      const isMobileUA =
+        /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini|mobile/i.test(
+          userAgent,
+        );
+      const isSmallScreen = window.innerWidth < 1024;
+      setIsMobileDevice(isMobileUA || isSmallScreen);
+    };
+    checkDevice();
+    window.addEventListener("resize", checkDevice);
+    return () => window.removeEventListener("resize", checkDevice);
+  }, []);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push("/login");
+  };
+
+  if (isMobileDevice) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center bg-gray-900 p-8 text-center h-screen w-full">
+        <ShieldAlert className="w-16 h-16 text-red-500 mb-6" />
+        <h1 className="text-2xl font-black text-white mb-2">
+          Access Restricted
+        </h1>
+        <p className="text-gray-400 font-medium max-w-sm">
+          Administrative ERP systems cannot be accessed via mobile devices or
+          emulators for security reasons. Please use a desktop workstation.
+        </p>
+        <button
+          onClick={handleLogout}
+          className="mt-8 px-6 py-2.5 bg-red-600 text-white font-bold rounded-lg hover:bg-red-700"
+        >
+          Sign Out
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-screen w-full bg-slate-900 text-slate-300 font-sans">
+      {/* Sidebar Panel */}
+      <aside className="w-64 bg-slate-950 flex flex-col shadow-2xl z-20 shrink-0">
+        <div className="p-6 border-b border-slate-800">
+          <h1 className="text-2xl font-black text-white tracking-tight">
+            ZEN<span className="text-[#38A1F3]">ERP</span>
+          </h1>
+          <p className="text-xs font-bold uppercase tracking-widest text-slate-500 mt-1">
+            Admin Portal
+          </p>
+        </div>
+        <nav className="flex-1 px-4 py-6 space-y-2">
+          <SidebarButton
+            icon={Activity}
+            label="Dashboard"
+            active={activeTab === "dashboard"}
+            onClick={() => setActiveTab("dashboard")}
+          />
+          <SidebarButton
+            icon={Trash2}
+            label="Delete Posts"
+            active={activeTab === "manage_posts"}
+            onClick={() => setActiveTab("manage_posts")}
+          />
+          <SidebarButton
+            icon={ShieldAlert}
+            label="Moderator Reports"
+            active={activeTab === "mod_reports"}
+            onClick={() => setActiveTab("mod_reports")}
+          />
+          <SidebarButton
+            icon={Users}
+            label="User Management"
+            active={activeTab === "users"}
+            onClick={() => setActiveTab("users")}
+          />
+        </nav>
+        <div className="p-4 border-t border-slate-800">
+          <div className="flex items-center gap-3 mb-4 px-2">
+            <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center border border-blue-500/50">
+              <User className="w-5 h-5 text-blue-400" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-white">
+                @{profile.username}
+              </p>
+              <p className="text-xs text-slate-500 font-medium">
+                Administrator
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="w-full py-2 bg-red-500/10 text-red-500 font-bold rounded-lg hover:bg-red-500/20 transition-colors"
+          >
+            End Session
+          </button>
+        </div>
+      </aside>
+
+      {/* Main ERP Content Area */}
+      <main className="flex-1 bg-slate-50 text-slate-900 overflow-y-auto relative">
+        <div className="max-w-6xl mx-auto p-8">
+          {activeTab === "dashboard" && <TabDashboard />}
+          {activeTab === "manage_posts" && (
+            <TabManagePosts
+              adminUsername={profile.username}
+              onRefresh={onRefresh}
+            />
+          )}
+          {activeTab === "mod_reports" && (
+            <TabModReports onRefresh={onRefresh} />
+          )}
+          {activeTab === "users" && <TabUserManagement />}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function SidebarButton({ icon: Icon, label, active, onClick }: any) {
+  return (
+    <button
+      onClick={onClick}
+      className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold transition-all ${
+        active
+          ? "bg-[#38A1F3] text-white shadow-lg"
+          : "text-slate-400 hover:bg-slate-900 hover:text-white"
+      }`}
+    >
+      <Icon className="w-5 h-5" />
+      {label}
+    </button>
+  );
+}
+
+// === ERP TABS ===
+
+function TabDashboard() {
+  const [stats, setStats] = useState({
+    users: 0,
+    communities: 0,
+    posts: 0,
+    pending: 0,
+  });
+  const [logs, setLogs] = useState<any[]>([]);
+
+  useEffect(() => {
+    async function fetchData() {
+      const { count: users } = await supabase
         .from("profiles")
         .select("*", { count: "exact", head: true });
-      const { count: commCount } = await supabase
+      const { count: comms } = await supabase
         .from("communities")
         .select("*", { count: "exact", head: true });
-      const { count: postCount } = await supabase
+      const { count: posts } = await supabase
         .from("posts")
         .select("*", { count: "exact", head: true });
-      const { data: queueData } = await supabase
+      const { count: pending } = await supabase
         .from("moderation_requests")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "pending");
+      const { data: logData } = await supabase
+        .from("admin_logs")
         .select("*")
-        .eq("status", "pending")
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .limit(10);
 
       setStats({
-        registeredUsers: userCount || 0,
-        totalCommunities: commCount || 0,
-        totalPosts: postCount || 0,
+        users: users || 0,
+        communities: comms || 0,
+        posts: posts || 0,
+        pending: pending || 0,
       });
+      if (logData) setLogs(logData);
+    }
+    fetchData();
+  }, []);
 
-      if (queueData) setModQueue(queueData);
-    } catch (err) {
-      console.error("Error fetching admin metrics:", err);
-    } finally {
-      setLoading(false);
+  return (
+    <div className="space-y-6">
+      <h2 className="text-2xl font-black tracking-tight">System Overview</h2>
+      <div className="grid grid-cols-4 gap-4">
+        <StatCard
+          title="Registered Users"
+          value={stats.users}
+          color="border-blue-500 text-blue-600"
+        />
+        <StatCard
+          title="Total Communities"
+          value={stats.communities}
+          color="border-purple-500 text-purple-600"
+        />
+        <StatCard
+          title="Total Platform Posts"
+          value={stats.posts}
+          color="border-green-500 text-green-600"
+        />
+        <StatCard
+          title="Pending Deletions"
+          value={stats.pending}
+          color="border-amber-500 text-amber-600"
+        />
+      </div>
+
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden mt-8">
+        <div className="bg-gray-50 px-6 py-4 border-b border-gray-200 font-bold">
+          Admin Deletion Logs
+        </div>
+        <table className="w-full text-left text-sm">
+          <thead>
+            <tr className="border-b border-gray-100 bg-gray-50/50">
+              <th className="p-4 text-gray-500 uppercase tracking-wider">
+                Report No
+              </th>
+              <th className="p-4 text-gray-500 uppercase tracking-wider">
+                Reported By
+              </th>
+              <th className="p-4 text-gray-500 uppercase tracking-wider">
+                Post ID
+              </th>
+              <th className="p-4 text-gray-500 uppercase tracking-wider">
+                Reason
+              </th>
+              <th className="p-4 text-gray-500 uppercase tracking-wider">
+                Status
+              </th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {logs.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="p-6 text-center text-gray-400">
+                  No logs generated yet.
+                </td>
+              </tr>
+            ) : (
+              logs.map((log) => (
+                <tr key={log.id}>
+                  <td className="p-4 font-bold">#{log.report_no}</td>
+                  <td className="p-4 font-medium text-blue-600">
+                    @{log.reported_by}
+                  </td>
+                  <td className="p-4 text-gray-500 text-xs">{log.post_id}</td>
+                  <td className="p-4 text-gray-700">
+                    {log.reason || "Manual Intervention"}
+                  </td>
+                  <td className="p-4">
+                    <span className="px-2 py-1 bg-red-50 text-red-600 font-bold text-xs rounded-md uppercase">
+                      {log.status}
+                    </span>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ title, value, color }: any) {
+  return (
+    <div className={`bg-white p-6 rounded-2xl border-l-4 shadow-sm ${color}`}>
+      <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500">
+        {title}
+      </h3>
+      <p className="text-3xl font-black mt-2 text-slate-900">{value}</p>
+    </div>
+  );
+}
+
+function TabManagePosts({ adminUsername, onRefresh }: any) {
+  const [postId, setPostId] = useState("");
+  const [postData, setPostData] = useState<any>(null);
+  const [reason, setReason] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const searchPost = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!postId.trim()) return;
+    setLoading(true);
+
+    // Explicitly fetch the post and its comments without triggering any navigation
+    const { data, error } = await supabase
+      .from("posts")
+      .select(
+        `
+        *,
+        profiles:posts_user_id_fkey (full_name, username, avatar_url),
+        communities:posts_community_id_fkey (name, slug),
+        comments ( id, content, created_at, profiles ( full_name, username, avatar_url ) )
+      `,
+      )
+      .eq("id", postId.trim())
+      .single();
+
+    setLoading(false);
+
+    if (error) {
+      alert(`Post not found or invalid ID. (${error.message})`);
+      setPostData(null);
+    } else if (data) {
+      // Sort comments by oldest first
+      if (data.comments) {
+        data.comments.sort(
+          (a: any, b: any) =>
+            new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+        );
+      }
+      setPostData(data);
     }
   };
 
+  const handleForceDelete = async () => {
+    if (!reason) return alert("Must provide a reason for the log.");
+
+    // Calls the secure backend function to bypass RLS blocks
+    const { error } = await supabase.rpc("admin_delete_post", {
+      target_post_id: postData.id,
+      admin_reason: reason,
+    });
+
+    if (!error) {
+      alert("Post successfully removed and logged in ERP.");
+      setPostData(null);
+      setPostId("");
+      setReason("");
+      if (onRefresh) onRefresh();
+    } else {
+      alert(`Failed to delete post: ${error.message}`);
+    }
+  };
+
+  return (
+    // Added pb-16 to add scroll clearance at the bottom of the page
+    <div className="space-y-6 pb-16">
+      <h2 className="text-2xl font-black tracking-tight">
+        Manual Post Override
+      </h2>
+      <form onSubmit={searchPost} className="flex gap-4">
+        <input
+          type="text"
+          value={postId}
+          onChange={(e) => setPostId(e.target.value)}
+          placeholder="Enter Exact Post UUID..."
+          className="flex-1 bg-white border border-gray-300 rounded-xl px-4 py-3 shadow-sm focus:outline-none focus:ring-2 focus:ring-[#38A1F3]"
+        />
+        <button
+          type="submit"
+          disabled={loading}
+          className="px-8 bg-slate-900 text-white font-bold rounded-xl shadow-md hover:bg-slate-800"
+        >
+          {loading ? "Searching..." : "Fetch Data"}
+        </button>
+      </form>
+
+      {postData && (
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 mt-6 animate-in fade-in slide-in-from-bottom-4">
+          {/* SPLIT LAYOUT: POST ON LEFT, COMMENTS ON RIGHT */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+            {/* LEFT SIDE: POST CONTENT */}
+            <div className="bg-gray-50 border border-gray-200 rounded-xl p-5 flex flex-col">
+              <h3 className="font-bold text-gray-500 uppercase tracking-wider text-xs mb-4">
+                Post Info
+              </h3>
+
+              <div className="flex items-center gap-3 mb-4 pb-4 border-b border-gray-200">
+                <img
+                  src={
+                    postData.profiles?.avatar_url ||
+                    "https://api.dicebear.com/7.x/initials/svg?seed=user"
+                  }
+                  className="w-12 h-12 rounded-full object-cover border border-gray-200"
+                />
+                <div>
+                  <p className="font-black text-gray-900">
+                    s/{postData.communities?.name || "community"}
+                  </p>
+                  <p className="text-sm font-medium text-blue-600">
+                    @{postData.profiles?.username}
+                  </p>
+                </div>
+              </div>
+
+              <p className="text-gray-900 text-base leading-relaxed mb-4 whitespace-pre-wrap flex-1">
+                {postData.content}
+              </p>
+
+              {postData.media_url && postData.media_type === "image" && (
+                <div className="mt-2 rounded-xl overflow-hidden border border-gray-200 bg-gray-100 shrink-0">
+                  <img
+                    src={postData.media_url}
+                    className="w-full h-auto max-h-64 object-cover"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* RIGHT SIDE: COMMENTS */}
+            <div className="bg-gray-50 border border-gray-200 rounded-xl p-5 flex flex-col max-h-[400px] lg:max-h-full">
+              <div className="flex items-center justify-between mb-4 shrink-0">
+                <h3 className="font-bold text-gray-500 uppercase tracking-wider text-xs">
+                  Post Comments
+                </h3>
+                <span className="bg-blue-100 text-blue-600 text-xs font-bold px-2 py-1 rounded-md">
+                  {postData.comments?.length || 0}
+                </span>
+              </div>
+
+              <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-thin scrollbar-thumb-gray-300">
+                {!postData.comments || postData.comments.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-gray-400 font-medium text-sm">
+                    No comments found on this post.
+                  </div>
+                ) : (
+                  postData.comments.map((comment: any) => (
+                    <div
+                      key={comment.id}
+                      className="bg-white border border-gray-100 p-3 rounded-lg flex gap-3 shadow-sm"
+                    >
+                      <img
+                        src={
+                          comment.profiles?.avatar_url ||
+                          "https://api.dicebear.com/7.x/initials/svg?seed=user"
+                        }
+                        className="w-8 h-8 rounded-full object-cover shrink-0"
+                      />
+                      <div>
+                        <p className="font-bold text-xs text-gray-900 mb-1">
+                          @{comment.profiles?.username}
+                        </p>
+                        <p className="text-sm text-gray-700">
+                          {comment.content}
+                        </p>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* BOTTOM SIDE: ACTIONS */}
+          <div className="pt-6 border-t border-gray-100 flex flex-col gap-4">
+            <input
+              type="text"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Reason for deletion (Required for ERP Logging)..."
+              className="w-full bg-gray-50 border border-gray-300 rounded-xl p-4 focus:outline-none focus:ring-2 focus:ring-red-400 font-medium"
+            />
+            <div className="flex gap-4">
+              <button
+                onClick={handleForceDelete}
+                className="flex-1 bg-red-600 text-white font-bold py-4 rounded-xl hover:bg-red-700 transition-all shadow-md active:scale-[0.99]"
+              >
+                Confirm & Remove Post
+              </button>
+              <button
+                onClick={() => setPostData(null)}
+                className="flex-1 bg-gray-200 text-gray-800 font-bold py-4 rounded-xl hover:bg-gray-300 transition-all active:scale-[0.99]"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+function TabModReports({ onRefresh }: any) {
+  const [modQueue, setModQueue] = useState<any[]>([]);
+
+  const fetchQ = async () => {
+    const { data } = await supabase
+      .from("moderation_requests")
+      .select("*")
+      .eq("status", "pending")
+      .order("created_at", { ascending: false });
+    if (data) setModQueue(data);
+  };
+
   useEffect(() => {
-    fetchAdminData();
+    fetchQ();
   }, []);
 
   const handleResolveRequest = async (
@@ -1665,215 +2170,210 @@ function AdminDashboardView({ profile, onRefresh }: any) {
   ) => {
     if (action === "deleted") {
       const extractedId = targetContent.replace("Post ID: ", "").trim();
-      await supabase.from("posts").delete().eq("id", extractedId);
+      // Uses the new RPC to bypass RLS blocks
+      await supabase.rpc("admin_delete_post", {
+        target_post_id: extractedId,
+        admin_reason: "Moderator Request Approved",
+      });
     }
 
     await supabase
       .from("moderation_requests")
       .update({ status: action })
       .eq("id", id);
-    fetchAdminData();
-    onRefresh();
+    fetchQ();
+    if (onRefresh) onRefresh();
   };
 
-  const handleManualRemovePost = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!manualPostId.trim()) return;
+  return (
+    <div className="space-y-6">
+      <h2 className="text-2xl font-black tracking-tight">
+        Moderator Report Queue
+      </h2>
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+        <table className="w-full text-left text-sm">
+          <thead>
+            <tr className="border-b border-gray-100 bg-gray-50 font-bold text-gray-500 uppercase tracking-wider">
+              <th className="p-4">Request ID</th>
+              <th className="p-4">Requested By</th>
+              <th className="p-4">Target</th>
+              <th className="p-4">Reason</th>
+              <th className="p-4 text-right">Action</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {modQueue.map((req) => (
+              <tr key={req.id}>
+                <td className="p-4 font-bold">{req.request_id}</td>
+                <td className="p-4 text-blue-600 font-medium">
+                  @{req.moderator_name}
+                </td>
+                <td className="p-4">{req.target_content}</td>
+                <td className="p-4">
+                  <span className="bg-red-50 text-red-600 px-2 py-1 rounded-md font-bold">
+                    {req.reason}
+                  </span>
+                </td>
+                <td className="p-4 flex gap-2 justify-end">
+                  <button
+                    onClick={() =>
+                      handleResolveRequest(
+                        req.id,
+                        "deleted",
+                        req.target_content,
+                      )
+                    }
+                    title="Approve & Delete Post"
+                    className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                  >
+                    <Trash2 className="w-5 h-5" />
+                  </button>
+                  <button
+                    onClick={() =>
+                      handleResolveRequest(
+                        req.id,
+                        "dismissed",
+                        req.target_content,
+                      )
+                    }
+                    title="Dismiss Request"
+                    className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                  >
+                    <CheckCircle className="w-5 h-5" />
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {modQueue.length === 0 && (
+              <tr>
+                <td colSpan={5} className="p-6 text-center text-gray-400">
+                  Queue is clean.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
-    const { error } = await supabase
-      .from("posts")
-      .delete()
-      .eq("id", manualPostId.trim());
-    if (error) {
-      alert(`Error removing post: ${error.message}`);
+function TabUserManagement() {
+  const [search, setSearch] = useState("");
+  const [userData, setUserData] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("username", search.replace("@", "").trim())
+      .maybeSingle();
+
+    setLoading(false);
+
+    if (data) {
+      setUserData(data);
     } else {
-      alert("Post successfully deleted by Admin.");
-      setManualPostId("");
-      fetchAdminData();
-      onRefresh();
+      alert("User not found in system.");
+      setUserData(null);
     }
   };
 
-  if (loading)
-    return (
-      <div className="flex-1 flex items-center justify-center bg-gray-50/50">
-        <Loader2 className="w-8 h-8 animate-spin text-[#38A1F3]" />
-      </div>
-    );
+  const handleStatusUpdate = async (status: string) => {
+    // Calls the secure backend function to bypass profile-update RLS blocks
+    const { error } = await supabase.rpc("admin_update_user_status", {
+      target_user_id: userData.id,
+      new_status: status,
+    });
+
+    if (!error) {
+      alert(
+        `User status successfully changed to ${status.toUpperCase()}. Live sessions will be automatically terminated.`,
+      );
+      setUserData({ ...userData, account_status: status });
+    } else {
+      alert(`Failed to update user status: ${error.message}`);
+    }
+  };
 
   return (
-    <div className="flex-1 flex flex-col w-full h-full bg-gray-50/50 overflow-y-auto">
-      <div className="max-w-7xl w-full mx-auto p-6 md:p-8 space-y-8">
-        <div>
-          <h2 className="text-3xl font-black text-gray-900 tracking-tight">
-            System Overview
-          </h2>
-          <p className="text-gray-500 font-medium mt-1">
-            Live database metrics and moderation queue.
-          </p>
-        </div>
+    <div className="space-y-6">
+      <h2 className="text-2xl font-black tracking-tight">
+        Security & User Management
+      </h2>
+      <form onSubmit={handleSearch} className="flex gap-4">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search via Exact Username..."
+          className="flex-1 bg-white border border-gray-300 rounded-xl px-4 py-3 shadow-sm focus:outline-none focus:ring-2 focus:ring-[#38A1F3]"
+        />
+        <button
+          type="submit"
+          disabled={loading}
+          className="px-8 bg-slate-900 text-white font-bold rounded-xl shadow-md hover:bg-slate-800"
+        >
+          {loading ? "Searching..." : "Locate User"}
+        </button>
+      </form>
 
-        <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm flex flex-col gap-4">
-          <h3 className="font-bold text-lg text-gray-900">
-            Manual Post Removal
-          </h3>
-          <form onSubmit={handleManualRemovePost} className="flex gap-4">
-            <input
-              type="text"
-              value={manualPostId}
-              onChange={(e) => setManualPostId(e.target.value)}
-              placeholder="Paste exact Post UUID link/ID here..."
-              className="flex-1 bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none"
-            />
-            <button
-              type="submit"
-              className="px-6 py-2.5 bg-red-600 text-white font-bold text-sm rounded-xl hover:bg-red-700 transition-colors"
-            >
-              Force Delete Post
-            </button>
-          </form>
-        </div>
+      {userData && (
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 flex items-start gap-8 shadow-sm mt-6">
+          <img
+            src={
+              userData.avatar_url ||
+              `https://api.dicebear.com/7.x/initials/svg?seed=user`
+            }
+            className="w-32 h-32 rounded-xl object-cover border border-gray-100"
+          />
+          <div className="flex-1">
+            <h3 className="text-2xl font-black">
+              {userData.full_name || "Unknown"}
+            </h3>
+            <p className="text-gray-500 font-medium">@{userData.username}</p>
+            <p className="text-sm mt-2 text-gray-700">
+              {userData.bio || "No bio provided."}
+            </p>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm flex flex-col">
-            <div className="flex items-center gap-3 mb-4 text-blue-500">
-              <Users className="w-6 h-6" />
-              <span className="font-bold text-sm uppercase tracking-wider">
-                Registered Users
-              </span>
+            <div className="mt-6 p-4 bg-gray-50 border border-gray-200 rounded-lg flex items-center justify-between">
+              <div>
+                <p className="text-xs font-bold text-gray-500 uppercase">
+                  Account Status
+                </p>
+                <p
+                  className={`text-lg font-black uppercase ${userData.account_status === "active" || !userData.account_status ? "text-green-600" : "text-red-600"}`}
+                >
+                  {userData.account_status || "ACTIVE"}
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => handleStatusUpdate("suspended")}
+                  className="px-4 py-2 bg-amber-500 text-white font-bold rounded-lg shadow-sm hover:bg-amber-600"
+                >
+                  Temp Suspend
+                </button>
+                <button
+                  onClick={() => handleStatusUpdate("banned")}
+                  className="px-4 py-2 bg-red-600 text-white font-bold rounded-lg shadow-sm hover:bg-red-700"
+                >
+                  Permanent Ban
+                </button>
+                <button
+                  onClick={() => handleStatusUpdate("active")}
+                  className="px-4 py-2 bg-green-600 text-white font-bold rounded-lg shadow-sm hover:bg-green-700"
+                >
+                  Restore Access
+                </button>
+              </div>
             </div>
-            <span className="text-4xl font-black text-gray-900">
-              {stats.registeredUsers}
-            </span>
-          </div>
-
-          <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm flex flex-col">
-            <div className="flex items-center gap-3 mb-4 text-purple-500">
-              <Globe className="w-6 h-6" />
-              <span className="font-bold text-sm uppercase tracking-wider">
-                Total Communities
-              </span>
-            </div>
-            <span className="text-4xl font-black text-gray-900">
-              {stats.totalCommunities}
-            </span>
-          </div>
-
-          <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm flex flex-col">
-            <div className="flex items-center gap-3 mb-4 text-green-500">
-              <Activity className="w-6 h-6" />
-              <span className="font-bold text-sm uppercase tracking-wider">
-                Total Platform Posts
-              </span>
-            </div>
-            <span className="text-4xl font-black text-gray-900">
-              {stats.totalPosts}
-            </span>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-3xl border border-gray-100 shadow-sm overflow-hidden">
-          <div className="p-6 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
-            <div className="flex items-center gap-3">
-              <ShieldAlert className="w-6 h-6 text-red-500" />
-              <h3 className="font-bold text-xl text-gray-900">
-                Moderator Request Queue
-              </h3>
-            </div>
-            <span className="bg-red-100 text-red-600 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider">
-              {modQueue.length} Pending
-            </span>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="bg-white border-b border-gray-100">
-                  <th className="p-4 font-bold text-sm text-gray-500 uppercase">
-                    Request ID
-                  </th>
-                  <th className="p-4 font-bold text-sm text-gray-500 uppercase">
-                    Requested By
-                  </th>
-                  <th className="p-4 font-bold text-sm text-gray-500 uppercase">
-                    Target
-                  </th>
-                  <th className="p-4 font-bold text-sm text-gray-500 uppercase">
-                    Reason
-                  </th>
-                  <th className="p-4 font-bold text-sm text-gray-500 uppercase text-right">
-                    Action
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {modQueue.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan={5}
-                      className="p-8 text-center text-gray-400 font-medium"
-                    >
-                      No pending requests!
-                    </td>
-                  </tr>
-                ) : (
-                  modQueue.map((req) => (
-                    <tr
-                      key={req.id}
-                      className="hover:bg-gray-50 transition-colors"
-                    >
-                      <td className="p-4 font-medium text-gray-900">
-                        {req.request_id}
-                      </td>
-                      <td className="p-4 font-medium text-blue-600">
-                        @{req.moderator_name}
-                      </td>
-                      <td className="p-4">
-                        <span className="text-sm underline text-gray-600">
-                          {req.target_content}
-                        </span>
-                      </td>
-                      <td className="p-4">
-                        <span className="text-xs font-bold text-red-600 bg-red-50 px-2 py-1 rounded-md">
-                          {req.reason}
-                        </span>
-                      </td>
-                      <td className="p-4 flex gap-2 justify-end">
-                        <button
-                          onClick={() =>
-                            handleResolveRequest(
-                              req.id,
-                              "deleted",
-                              req.target_content,
-                            )
-                          }
-                          title="Approve & Delete Post"
-                          className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                        >
-                          <Trash2 className="w-5 h-5" />
-                        </button>
-                        <button
-                          onClick={() =>
-                            handleResolveRequest(
-                              req.id,
-                              "dismissed",
-                              req.target_content,
-                            )
-                          }
-                          title="Dismiss Request"
-                          className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors"
-                        >
-                          <CheckCircle className="w-5 h-5" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
